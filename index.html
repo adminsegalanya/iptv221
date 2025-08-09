@@ -1,0 +1,259 @@
+<!doctype html>
+<html lang="id">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>IPTV Player — Fullscreen</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/shaka-player/4.3.8/shaka-player.compiled.js"></script>
+  <style>
+    html,body{height:100%;margin:0;padding:0;background:#000;color:#fff;font-family:Inter,Segoe UI,Roboto,Helvetica,Arial}
+    #video{
+      width:100%;
+      height:100%;
+      object-fit:cover;
+      background:#000;
+      position:absolute;
+      top:0;
+      left:50%;
+      transform:translateX(-50%);
+      max-width:177.78vh; /* 16:9 aspect ratio */
+    }
+    /* overlay when change channel */
+    #ov{position:fixed;left:50%;top:10%;transform:translateX(-50%);background:rgba(0,0,0,0.6);padding:12px 18px;border-radius:10px;font-size:18px;display:none;z-index:60}
+    /* small channel number in corner */
+    #chnum{position:fixed;right:12px;bottom:12px;background:rgba(0,0,0,0.5);padding:8px 10px;border-radius:8px;font-weight:600; display:none;}
+    /* channel list (hidden by default) */
+    <!-- --->
+    #chlist{position:fixed;left:10px;bottom:10px;width:200px;background:rgba(0,0,0,0.8);padding:10px;border-radius:8px;overflow-y:auto;max-height:50%;display:none;z-index:70}
+    #chlist button{width:100%;text-align:left;padding:5px 10px;margin:2px 0;border:none;background:none;color:#fff;cursor:pointer}
+    #chlist button:hover{background:#333}
+    #chlist button.active{background:gold;color:#000}
+    <!-- --->
+    /* info in top right (hidden by default, top layer) */
+    #info{position:fixed;right:12px;top:12px;background:rgba(0,0,0,0.7);padding:8px 12px;border-radius:8px;display:none;z-index:1000}
+    #info .logo{font-size:24px;color:gold}
+    #info .channel-info{margin-top:5px;font-size:14px}
+    #info .channel-info span{color:#ffd700}
+    /* Responsive adjustments */
+    @media (max-width: 768px) {
+      body {
+        padding: 0 10px; /* Ambient padding like YouTube */
+        overflow-x: hidden;
+      }
+      #video {
+        height: 100vh;
+        max-width: 177.78vh; /* Maintain 16:9 */
+      }
+    }
+    @media (min-width: 769px) and (max-width: 1280px) {
+      #video {
+        max-height: 90vh;
+        width: auto;
+        margin: 0 auto;
+      }
+    }
+    @media (min-width: 1281px) {
+      #video {
+        max-height: 95vh;
+        width: auto;
+        margin: 0 auto;
+      }
+    }
+    /* hide default video controls */
+    video::-internal-media-controls { display:none; }
+  </style>
+</head>
+<body>
+  <video id="video" autoplay playsinline muted></video>
+  <div id="ov"></div>
+  <div id="chnum"></div>
+  <!-- --->
+  <div id="chlist"></div>
+  <!-- --->
+  <div id="info"><i class="fas fa-tv" aria-hidden="true"></i><div class="channel-info"><span id="ch-num"></span> - <span id="ch-name"></span></div></div>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0-beta3/js/all.min.js"></script>
+<script>
+(async function(){
+  // --- Utility: parse query param playlist or default
+  const params = new URLSearchParams(location.search);
+  const playlistURL = params.get('playlist') || 'https://raw.githubusercontent.com/adminsegalanya/gudangiptv-org.github.io/refs/heads/main/ukn.m3u';
+  // --- Load playlist text
+  async function fetchText(url){
+    const res = await fetch(url, {cache: 'no-store', mode: 'cors'});
+    if(!res.ok) throw new Error('Gagal ambil playlist: ' + res.status + ' ' + res.statusText);
+    return await res.text();
+  }
+  // --- Parse basic M3U-like playlist (EXTINF + URL) into channels[]
+  function parseM3U(text){
+    const lines = text.split(/\r?\n/).map(l=>l.trim()).filter(Boolean);
+    const out = [];
+    let lastInf = null;
+    for(const l of lines){
+      if(l.startsWith('#EXTINF')){
+        lastInf = l; continue;
+      }
+      if(l.startsWith('#')) continue;
+      let url = l;
+      let clearkey = null;
+      const pipeIdx = l.indexOf('|clearkey=');
+      if(pipeIdx !== -1){
+        url = l.substring(0, pipeIdx);
+        const ck = l.substring(pipeIdx + '|clearkey='.length);
+        clearkey = ck.split(';').reduce((map,p)=>p.split(':').length===2 && (map[p.split(':')[0]]=p.split(':')[1],map),{});
+      }
+      let name = lastInf ? lastInf.split(',')[1]?.trim() || url : url;
+      out.push({url, name, clearkey});
+      lastInf = null;
+    }
+    return out;
+  }
+  // --- Hex -> Base64 URL-safe
+  function hexToUint8(hex){
+    if(hex.length%2!==0) hex = '0'+hex;
+    const arr = new Uint8Array(hex.length/2);
+    for(let i=0;i<arr.length;i++) arr[i] = parseInt(hex.substr(i*2,2),16);
+    return arr;
+  }
+  function uint8ToBase64Url(u8){
+    let binary = '';
+    for(let i=0;i<u8.length;i++) binary += String.fromCharCode(u8[i]);
+    let b64 = btoa(binary);
+    return b64.replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');
+  }
+  // --- Try to fetch and parse playlist
+  let channels = [];
+  try{
+    const txt = await fetchText(playlistURL);
+    channels = parseM3U(txt);
+    if(channels.length===0) throw new Error('Playlist kosong');
+  }catch(err){
+    alert('Gagal load playlist dari "'+playlistURL+'" — cek console.\n'+err.message);
+    console.error(err);
+    return;
+  }
+  // --- Shaka init
+  shaka.polyfill.installAll();
+  if(!shaka.Player.isBrowserSupported()){
+    alert('Browser tidak mendukung Shaka Player.');
+    return;
+  }
+  const video = document.getElementById('video');
+  const player = new shaka.Player(video);
+  player.configure({
+    streaming: {rebufferingGoal: 0.5, bufferingGoal: 30, jumpLargeGaps: true},
+    abr: {enabled: true},
+    drm: {retryParameters: {maxAttempts: 3, backoffFactor: 2}}
+  });
+  let currentIndex = 0;
+  const ov = document.getElementById('ov');
+  const chnum = document.getElementById('chnum');
+  const info = document.getElementById('info');
+  const chNumSpan = document.getElementById('ch-num');
+  const chNameSpan = document.getElementById('ch-name');
+  let ovTimer = null;
+  let infoTimer = null;
+
+  function showOverlay(text){
+    ov.textContent = text;
+    ov.style.display = 'block';
+    clearTimeout(ovTimer);
+    ovTimer = setTimeout(() => ov.style.display = 'none', 2000);
+  }
+
+  function updateCorner(){
+    chnum.textContent = 'CH ' + (currentIndex+1) + (channels[currentIndex].name ? ' — ' + channels[currentIndex].name : '');
+  }
+
+  function updateInfo(){
+    chNumSpan.textContent = 'CH ' + (currentIndex + 1);
+    chNameSpan.textContent = channels[currentIndex].name || 'No Name';
+    info.style.display = 'block';
+    chnum.style.display = 'block'; // Show chnum with info
+    clearTimeout(infoTimer);
+    infoTimer = setTimeout(() => {
+      info.style.display = 'none';
+      chnum.style.display = 'none'; // Hide chnum with info
+    }, 5000);
+  }
+
+  async function applyClearKeyIfAny(ch){
+    if(!ch.clearkey) return;
+    const map = {};
+    for(const kidHex of Object.keys(ch.clearkey)){
+      try{
+        const keyHex = ch.clearkey[kidHex];
+        const kidB64 = uint8ToBase64Url(hexToUint8(kidHex.replace(/^0x/i,'')));
+        const keyB64 = uint8ToBase64Url(hexToUint8(keyHex.replace(/^0x/i,'')));
+        map[kidB64] = keyB64;
+      }catch(e){ console.warn('ClearKey parse error for', kidHex, e); }
+    }
+    if(Object.keys(map).length) player.configure({drm: {clearKeys: map}});
+  }
+
+  async function loadChannel(idx){
+    currentIndex = (idx + channels.length) % channels.length;
+    const ch = channels[currentIndex];
+    updateCorner();
+    showOverlay('CH ' + (currentIndex+1) + (ch.name ? ' • ' + ch.name : ''));
+    try{
+      player.unload();
+      player.configure({drm: {clearKeys: {}}});
+      if(ch.clearkey) await applyClearKeyIfAny(ch);
+      await player.load(ch.url);
+      console.log('Loaded', ch.url);
+      setTimeout(() => { if(video.muted) video.muted = false; }, 800);
+      updateInfo(); // Show info on channel change
+    }catch(e){
+      console.error('Load error for', ch.url, e);
+      showOverlay('Error loading channel');
+    }
+  }
+
+  // Navigation
+  function changeChannel(delta){ loadChannel(currentIndex + delta); }
+  function goToChannel(number){ const idx = number - 1; if(idx>=0 && idx<channels.length) loadChannel(idx); }
+
+  // Keyboard
+  document.addEventListener('keydown', (e) => {
+    if(e.key === 'ArrowRight') changeChannel(1); // Next channel
+    if(e.key === 'ArrowLeft') changeChannel(-1);  // Previous channel
+    if(/^[0-9]$/.test(e.key)){
+      const n = parseInt(e.key,10);
+      if(n!==0) goToChannel(n);
+    }
+  });
+
+  // Swipe for mobile
+  let sx = null;
+  document.addEventListener('touchstart', e => { sx = e.changedTouches[0].clientX; });
+  document.addEventListener('touchend', e => {
+    if(sx === null) return;
+    const dx = e.changedTouches[0].clientX - sx;
+    if(dx > 60) changeChannel(-1); // Swipe right for previous
+    if(dx < -60) changeChannel(1); // Swipe left for next
+    sx = null;
+  });
+
+  // Touch interaction (single tap to show info)
+  let lastTouch = 0;
+  document.addEventListener('touchstart', (e) => {
+    const now = Date.now();
+    if(now - lastTouch > 300){ // Single tap
+      updateInfo();
+      clearTimeout(infoTimer);
+      infoTimer = setTimeout(() => {
+        info.style.display = 'none';
+        chnum.style.display = 'none'; // Hide chnum with info
+      }, 5000);
+    }
+    lastTouch = now;
+  });
+
+  // Start first channel and show info
+  await loadChannel(0);
+  updateInfo(); // Show info on startup
+  window.__IPTV = {channels, loadChannel, changeChannel, goToChannel};
+})();
+</script>
+</body>
+</html>
